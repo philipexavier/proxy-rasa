@@ -31,7 +31,8 @@ app.post("/v1/chat/completions", async (req, res) => {
   });
 });
 
-app.listen(3100, () => console.log("Proxy running on 3000"));
+app.listen(3100, () => console.log("Proxy running on 3100"));
+
 
 
 
