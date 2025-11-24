@@ -1,4 +1,3 @@
-cat << 'EOF' > /etc/easypanel/projects/rede_andrade/rasa-proxy-openai/code/index.js
 import express from "express";
 import fetch from "node-fetch";
 
@@ -32,5 +31,5 @@ app.post("/v1/chat/completions", async (req, res) => {
   });
 });
 
-app.listen(3000, () => console.log("Proxy running"));
-EOF
+app.listen(3000, () => console.log("Proxy running on 3000"));
+
