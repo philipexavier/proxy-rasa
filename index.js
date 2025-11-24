@@ -4,7 +4,7 @@ import fetch from "node-fetch";
 const app = express();
 app.use(express.json());
 
-const RASA_URL = "http://rede_andrade_rasa-server:5005/webhooks/rest/webhook";
+const RASA_URL = "http://10.0.1.13:5005/webhooks/rest/webhook";
 
 app.post("/v1/chat/completions", async (req, res) => {
   const userMessage = req.body?.messages?.find(m => m.role === "user")?.content || "";
@@ -32,4 +32,5 @@ app.post("/v1/chat/completions", async (req, res) => {
 });
 
 app.listen(3000, () => console.log("Proxy running on 3000"));
+
 
