@@ -1,11 +1,18 @@
 FROM node:18
 
 WORKDIR /app
-COPY package.json ./
+
+# Copia primeiro o package.json para cache de dependências
+COPY package*.json ./
+
+# Instala dependências
 RUN npm install
 
+# Copia todo o código
 COPY . .
 
-EXPOSE 3100
-CMD ["node","index.js"]
+# Porta interna — NÃO mexer
+EXPOSE 3000
 
+# Start
+CMD ["node", "index.js"]
