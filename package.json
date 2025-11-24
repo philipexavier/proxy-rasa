@@ -1,4 +1,3 @@
-cat << 'EOF' > /etc/easypanel/projects/rede_andrade/rasa-proxy-openai/code/package.json
 {
   "name": "rasa-proxy",
   "version": "1.0.0",
@@ -12,4 +11,3 @@ cat << 'EOF' > /etc/easypanel/projects/rede_andrade/rasa-proxy-openai/code/packa
     "node-fetch": "^3.3.2"
   }
 }
-EOF
