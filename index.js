@@ -4,46 +4,53 @@ import fetch from "node-fetch";
 const app = express();
 app.use(express.json());
 
-// URL do Rasa interno
+// URL correta do Rasa REST webhook
 const RASA_URL = "http://rede_andrade_rasa-server:5005/webhooks/rest/webhook";
+
+// Concatena todas as mensagens do estilo OpenAI
+function buildPrompt(messages) {
+  return messages
+    .map(m => {
+      if (m.role === "system") return `### SYSTEM\n${m.content}`;
+      if (m.role === "assistant") return `### ASSISTANT\n${m.content}`;
+      return `### USER\n${m.content}`;
+    })
+    .join("\n\n");
+}
 
 app.post("/v1/chat/completions", async (req, res) => {
   try {
-    const { messages } = req.body;
+    const { messages, model } = req.body;
 
     if (!messages || !messages.length) {
       return res.status(400).json({ error: "Missing messages" });
     }
 
-    // Última mensagem do usuário
-    const userMessage = messages[messages.length - 1].content;
+    // Junta system + user + assistant em um prompt só
+    const prompt = buildPrompt(messages);
 
-    // Chama o Rasa
+    // Envia o prompt inteiro ao Rasa
     const rasaResponse = await fetch(RASA_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         sender: "captain",
-        message: userMessage
+        message: prompt
       })
     });
 
     const rasaJson = await rasaResponse.json();
     const text = rasaJson?.[0]?.text || "";
 
-    // Resposta no formato OpenAI
     return res.json({
       id: "chatcmpl-" + Date.now(),
       object: "chat.completion",
       created: Math.floor(Date.now() / 1000),
-      model: req.body.model || "rasa-proxy",
+      model: model || "rasa-proxy",
       choices: [
         {
           index: 0,
-          message: {
-            role: "assistant",
-            content: text
-          },
+          message: { role: "assistant", content: text },
           finish_reason: "stop"
         }
       ],
