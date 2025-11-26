@@ -43,18 +43,10 @@ function detectOperationFromSystem(systemContent) {
   return null;
 }
 
-// -------------------------------------------------------
-// Detect Captain Requests
-// -------------------------------------------------------
-
 function isCaptainRequest(messages) {
   const sys = messages.find((m) => m.role === "system")?.content || "";
   return sys.includes("[Identity]") && sys.includes("[Task]");
 }
-
-// -------------------------------------------------------
-// Summary fallback
-// -------------------------------------------------------
 
 function extractiveSummary(text, maxSentences = 3) {
   if (!text) return "";
@@ -100,7 +92,7 @@ async function callRasa(prompt, sender = "captain") {
 }
 
 // -------------------------------------------------------
-// OPENAI COMPATIBLE BUILDER
+// BUILD OPENAI RESPONSE
 // -------------------------------------------------------
 
 function buildOpenAIResponse(text, model) {
@@ -133,7 +125,6 @@ function buildOpenAIResponse(text, model) {
 
 app.post("/v1/chat/completions", async (req, res) => {
   try {
-    // Validate OpenAI format
     const validation = validateOpenAIRequest(req.body);
     if (!validation.ok) {
       return res.status(400).json(validation.error);
@@ -142,7 +133,7 @@ app.post("/v1/chat/completions", async (req, res) => {
     const { messages, model } = req.body;
 
     // ---------------------------------------------------
-    // CAPTAIN REQUEST MODE
+    // CAPTAIN REQUEST — STRICT JSON MODE
     // ---------------------------------------------------
     if (isCaptainRequest(messages)) {
       console.log("⚡ Captain request detected");
@@ -157,11 +148,32 @@ app.post("/v1/chat/completions", async (req, res) => {
           ? rasaResp.texts.join("\n")
           : "Desculpe, não consegui obter uma resposta agora.";
 
-      // MUST respond EXACTLY in JSON format
-      return res.json({
-        reasoning:
-          "A resposta foi gerada a partir do modelo conversacional treinado da Rede Andrade.",
+      const captainPayload = {
+        reasoning: "",
         response: responseText,
+        stop: false,
+      };
+
+      return res.json({
+        id: `chatcmpl-${Date.now()}`,
+        object: "chat.completion",
+        created: Math.floor(Date.now() / 1000),
+        model: model || DEFAULT_MODEL,
+        choices: [
+          {
+            index: 0,
+            message: {
+              role: "assistant",
+              content: JSON.stringify(captainPayload),
+            },
+            finish_reason: "stop",
+          },
+        ],
+        usage: {
+          prompt_tokens: 0,
+          completion_tokens: responseText.length,
+          total_tokens: responseText.length,
+        },
       });
     }
 
@@ -179,7 +191,6 @@ app.post("/v1/chat/completions", async (req, res) => {
 
     console.info("Proxy operation:", operation || "default");
 
-    // SUMMARIZE
     if (operation === "summarize") {
       const rasaPrompt = `OPERATION: summarize\n\n${convoText}`;
       const rasaResp = await callRasa(rasaPrompt);
@@ -194,7 +205,6 @@ app.post("/v1/chat/completions", async (req, res) => {
       return res.json(buildOpenAIResponse(fallback, model));
     }
 
-    // OTHER OPS
     if (operation && operation !== "summarize") {
       const rasaPrompt = `OPERATION: ${operation}\n\n${convoText}`;
       const rasaResp = await callRasa(rasaPrompt);
@@ -208,7 +218,6 @@ app.post("/v1/chat/completions", async (req, res) => {
       return res.json(buildOpenAIResponse(convoText, model));
     }
 
-    // DEFAULT
     const lastUser = [...messages].reverse().find((m) => m.role === "user");
     const lastText = lastUser?.content || convoText;
 
