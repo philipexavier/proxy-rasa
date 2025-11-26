@@ -43,7 +43,19 @@ function detectOperationFromSystem(systemContent) {
   return null;
 }
 
-// Fallback summary
+// -------------------------------------------------------
+// Detect Captain Requests
+// -------------------------------------------------------
+
+function isCaptainRequest(messages) {
+  const sys = messages.find((m) => m.role === "system")?.content || "";
+  return sys.includes("[Identity]") && sys.includes("[Task]");
+}
+
+// -------------------------------------------------------
+// Summary fallback
+// -------------------------------------------------------
+
 function extractiveSummary(text, maxSentences = 3) {
   if (!text) return "";
 
@@ -59,6 +71,7 @@ function extractiveSummary(text, maxSentences = 3) {
 // -------------------------------------------------------
 // RASA REQUEST
 // -------------------------------------------------------
+
 async function callRasa(prompt, sender = "captain") {
   try {
     const resp = await fetch(RASA_URL, {
@@ -75,7 +88,6 @@ async function callRasa(prompt, sender = "captain") {
 
     const j = await resp.json();
 
-    // PEGA TODAS AS MENSAGENS QUE O RASA RETORNOU
     const texts = j
       .map((m) => m.text || m.message || null)
       .filter(Boolean);
@@ -88,8 +100,9 @@ async function callRasa(prompt, sender = "captain") {
 }
 
 // -------------------------------------------------------
-// OPENAI FORMATTER 100% CAPTAIN COMPATIBLE
+// OPENAI COMPATIBLE BUILDER
 // -------------------------------------------------------
+
 function buildOpenAIResponse(text, model) {
   return {
     id: `chatcmpl-${Date.now()}`,
@@ -120,12 +133,41 @@ function buildOpenAIResponse(text, model) {
 
 app.post("/v1/chat/completions", async (req, res) => {
   try {
+    // Validate OpenAI format
     const validation = validateOpenAIRequest(req.body);
     if (!validation.ok) {
       return res.status(400).json(validation.error);
     }
 
     const { messages, model } = req.body;
+
+    // ---------------------------------------------------
+    // CAPTAIN REQUEST MODE
+    // ---------------------------------------------------
+    if (isCaptainRequest(messages)) {
+      console.log("⚡ Captain request detected");
+
+      const lastUser = [...messages].reverse().find((m) => m.role === "user");
+      const userText = lastUser?.content || "";
+
+      const rasaResp = await callRasa(userText);
+
+      const responseText =
+        rasaResp.ok && rasaResp.texts.length
+          ? rasaResp.texts.join("\n")
+          : "Desculpe, não consegui obter uma resposta agora.";
+
+      // MUST respond EXACTLY in JSON format
+      return res.json({
+        reasoning:
+          "A resposta foi gerada a partir do modelo conversacional treinado da Rede Andrade.",
+        response: responseText,
+      });
+    }
+
+    // ---------------------------------------------------
+    // NORMAL OPENAI MODE
+    // ---------------------------------------------------
 
     const systemMsg = messages.find((m) => m.role === "system");
     const systemContent = systemMsg?.content || null;
@@ -137,9 +179,7 @@ app.post("/v1/chat/completions", async (req, res) => {
 
     console.info("Proxy operation:", operation || "default");
 
-    // ---------------------------------------------------
     // SUMMARIZE
-    // ---------------------------------------------------
     if (operation === "summarize") {
       const rasaPrompt = `OPERATION: summarize\n\n${convoText}`;
       const rasaResp = await callRasa(rasaPrompt);
@@ -154,9 +194,7 @@ app.post("/v1/chat/completions", async (req, res) => {
       return res.json(buildOpenAIResponse(fallback, model));
     }
 
-    // ---------------------------------------------------
-    // OTHER OPERATIONS
-    // ---------------------------------------------------
+    // OTHER OPS
     if (operation && operation !== "summarize") {
       const rasaPrompt = `OPERATION: ${operation}\n\n${convoText}`;
       const rasaResp = await callRasa(rasaPrompt);
@@ -170,9 +208,7 @@ app.post("/v1/chat/completions", async (req, res) => {
       return res.json(buildOpenAIResponse(convoText, model));
     }
 
-    // ---------------------------------------------------
-    // DEFAULT: reply from Rasa
-    // ---------------------------------------------------
+    // DEFAULT
     const lastUser = [...messages].reverse().find((m) => m.role === "user");
     const lastText = lastUser?.content || convoText;
 
