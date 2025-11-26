@@ -12,7 +12,9 @@ const RASA_URL =
 const PORT = process.env.PORT ? Number(process.env.PORT) : 3000;
 const DEFAULT_MODEL = "rasa-proxy";
 
-// ------------------ Helpers ------------------ //
+// -------------------------------------------------------
+// Helpers
+// -------------------------------------------------------
 
 function joinMessages(messages) {
   return messages
@@ -41,12 +43,11 @@ function detectOperationFromSystem(systemContent) {
   return null;
 }
 
-// resumo simples local
+// Fallback summary
 function extractiveSummary(text, maxSentences = 3) {
   if (!text) return "";
 
   text = text.replace(/\r/g, " ").replace(/\n+/g, " ").trim();
-
   const sentences = text.split(/(?<=[.!?])\s+/);
   const filtered = sentences.filter((s) => s.trim().length > 20);
 
@@ -55,6 +56,9 @@ function extractiveSummary(text, maxSentences = 3) {
   return usable.slice(0, maxSentences).join(" ").trim();
 }
 
+// -------------------------------------------------------
+// RASA REQUEST
+// -------------------------------------------------------
 async function callRasa(prompt, sender = "captain") {
   try {
     const resp = await fetch(RASA_URL, {
@@ -66,22 +70,26 @@ async function callRasa(prompt, sender = "captain") {
     if (!resp.ok) {
       const text = await resp.text();
       console.error("Rasa error:", resp.status, text);
-      return { ok: false, text: null };
+      return { ok: false, texts: [] };
     }
 
     const j = await resp.json();
-    const text =
-      Array.isArray(j) && j.length
-        ? j[0].text || j[0].message || null
-        : null;
 
-    return { ok: true, text };
+    // PEGA TODAS AS MENSAGENS QUE O RASA RETORNOU
+    const texts = j
+      .map((m) => m.text || m.message || null)
+      .filter(Boolean);
+
+    return { ok: true, texts };
   } catch (err) {
     console.error("Error calling Rasa:", err);
-    return { ok: false, text: null };
+    return { ok: false, texts: [] };
   }
 }
 
+// -------------------------------------------------------
+// OPENAI FORMATTER 100% CAPTAIN COMPATIBLE
+// -------------------------------------------------------
 function buildOpenAIResponse(text, model) {
   return {
     id: `chatcmpl-${Date.now()}`,
@@ -91,19 +99,27 @@ function buildOpenAIResponse(text, model) {
     choices: [
       {
         index: 0,
-        message: { role: "assistant", content: text || "" },
+        message: {
+          role: "assistant",
+          content: text || "",
+        },
         finish_reason: "stop",
       },
     ],
-    usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
+    usage: {
+      prompt_tokens: 0,
+      completion_tokens: (text || "").length,
+      total_tokens: (text || "").length,
+    },
   };
 }
 
-// ------------------ Route ------------------ //
+// -------------------------------------------------------
+// CHAT COMPLETIONS ENDPOINT
+// -------------------------------------------------------
 
 app.post("/v1/chat/completions", async (req, res) => {
   try {
-    // valida OpenAI-format
     const validation = validateOpenAIRequest(req.body);
     if (!validation.ok) {
       return res.status(400).json(validation.error);
@@ -115,45 +131,57 @@ app.post("/v1/chat/completions", async (req, res) => {
     const systemContent = systemMsg?.content || null;
 
     const operation = detectOperationFromSystem(systemContent);
-
     const convoText = joinMessages(
       messages.filter((m) => m.role !== "system")
     );
 
     console.info("Proxy operation:", operation || "default");
 
-    // ---------- summarize ---------- //
+    // ---------------------------------------------------
+    // SUMMARIZE
+    // ---------------------------------------------------
     if (operation === "summarize") {
       const rasaPrompt = `OPERATION: summarize\n\n${convoText}`;
       const rasaResp = await callRasa(rasaPrompt);
 
-      if (rasaResp.ok && rasaResp.text) {
-        return res.json(buildOpenAIResponse(rasaResp.text, model));
+      if (rasaResp.ok && rasaResp.texts.length) {
+        return res.json(
+          buildOpenAIResponse(rasaResp.texts.join("\n"), model)
+        );
       }
 
-      const fallback = extractiveSummary(convoText, 3);
+      const fallback = extractiveSummary(convoText);
       return res.json(buildOpenAIResponse(fallback, model));
     }
 
-    // ---------- other operations ---------- //
+    // ---------------------------------------------------
+    // OTHER OPERATIONS
+    // ---------------------------------------------------
     if (operation && operation !== "summarize") {
       const rasaPrompt = `OPERATION: ${operation}\n\n${convoText}`;
       const rasaResp = await callRasa(rasaPrompt);
 
-      if (rasaResp.ok && rasaResp.text) {
-        return res.json(buildOpenAIResponse(rasaResp.text, model));
+      if (rasaResp.ok && rasaResp.texts.length) {
+        return res.json(
+          buildOpenAIResponse(rasaResp.texts.join("\n"), model)
+        );
       }
 
       return res.json(buildOpenAIResponse(convoText, model));
     }
 
-    // ---------- default (reply from Rasa) ---------- //
+    // ---------------------------------------------------
+    // DEFAULT: reply from Rasa
+    // ---------------------------------------------------
     const lastUser = [...messages].reverse().find((m) => m.role === "user");
     const lastText = lastUser?.content || convoText;
 
     const rasaResp = await callRasa(lastText);
-    if (rasaResp.ok && rasaResp.text) {
-      return res.json(buildOpenAIResponse(rasaResp.text, model));
+
+    if (rasaResp.ok && rasaResp.texts.length) {
+      return res.json(
+        buildOpenAIResponse(rasaResp.texts.join("\n"), model)
+      );
     }
 
     return res.json(buildOpenAIResponse("", model));
