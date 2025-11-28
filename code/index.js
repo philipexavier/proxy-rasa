@@ -94,6 +94,38 @@ function normalizePortuguese(text) {
   return out;
 }
 
+// Extract system message safely (handles string, array of chunks, object)
+function extractSystem(systemContent) {
+  if (!systemContent) return "";
+  if (typeof systemContent === "string") return systemContent;
+  try {
+    if (Array.isArray(systemContent)) {
+      return systemContent
+        .map((c) => {
+          if (!c) return "";
+          if (typeof c === "string") return c;
+          if (typeof c.text === "string") return c.text;
+          if (typeof c.content === "string") return c.content;
+          return "";
+        })
+        .filter(Boolean)
+        .join(" ");
+    }
+    if (typeof systemContent === "object") {
+      // try common nested shapes
+      if (typeof systemContent.text === "string") return systemContent.text;
+      if (typeof systemContent.content === "string") return systemContent.content;
+      if (Array.isArray(systemContent.content)) {
+        return systemContent.content.map((c) => (c.text ? c.text : "")).join(" ");
+      }
+      return JSON.stringify(systemContent);
+    }
+  } catch (err) {
+    return String(systemContent);
+  }
+  return String(systemContent);
+}
+
 // Validate incoming OpenAI-style request: support both validator.validateOpenAIRequest and validator.validate
 function validateOpenAIRequest(body) {
   if (!body) return { ok: false, error: { error: { message: "Missing body", type: "invalid_request_error" } } };
@@ -115,14 +147,16 @@ function validateOpenAIRequest(body) {
 // Detect captain mode (assistant + Task/Identity markers)
 function isCaptainMode(messages = []) {
   if (!Array.isArray(messages)) return false;
-  const system = messages.find((m) => m.role === "system")?.content || "";
+  const systemContent = messages.find((m) => m.role === "system")?.content;
+  const system = extractSystem(systemContent);
   return typeof system === "string" && system.includes("[Identity]") && system.includes("[Task]");
 }
 
 // Detect operation from system prompt
 function detectOperationFromSystem(systemContent) {
-  if (!systemContent || typeof systemContent !== "string") return null;
-  const s = systemContent.toLowerCase();
+  const system = extractSystem(systemContent);
+  if (!system || typeof system !== "string") return null;
+  const s = system.toLowerCase();
   if (s.includes("summarize")) return "summarize";
   if (s.includes("shorten")) return "shorten";
   if (s.includes("rephrase")) return "rephrase";
@@ -146,22 +180,31 @@ function joinMessagesForLLM(messages = []) {
     .join("\n\n");
 }
 
+// Timeout helper for fetch with AbortController
+function fetchWithTimeout(url, opts = {}, timeoutMs = RASA_TIMEOUT_MS) {
+  const controller = new AbortController();
+  const id = setTimeout(() => controller.abort(), timeoutMs);
+  const merged = { signal: controller.signal, ...opts };
+  return fetch(url, merged).finally(() => clearTimeout(id));
+}
+
 // Try local LLM (if configured) - expects JSON response { text / generated_text / response }
 async function callLocalLLM(prompt) {
   if (!LOCAL_LLM_URL) return { ok: false };
   try {
-    const resp = await fetch(LOCAL_LLM_URL, {
+    const resp = await fetchWithTimeout(LOCAL_LLM_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ prompt }),
-      timeout: RASA_TIMEOUT_MS,
-    });
-    if (!resp.ok) return { ok: false };
+    }, RASA_TIMEOUT_MS);
+
+    if (!resp.ok) return { ok: false, status: resp.status };
     const j = await resp.json();
-    return { ok: true, raw: j };
+    // Accept many shapes: { text }, { response }, { generated_text }, plain string
+    return { ok: true, raw: j, source: "local_llm" };
   } catch (err) {
     safeLog("local LLM error", err && err.message ? err.message : err);
-    return { ok: false };
+    return { ok: false, error: String(err && err.message ? err.message : err) };
   }
 }
 
@@ -178,12 +221,11 @@ async function callRasaApi({ text, conversation_id = null, metadata = {}, sender
     if (conversation_id && !parseOnly) {
       const url = `${RASA_URL.replace(/\/$/, "")}/conversations/${encodeURIComponent(conversation_id)}/parse`;
       safeLog("Rasa API (conversation parse)", { url, text: truncateText(text, 500) });
-      const r = await fetch(url, {
+      const r = await fetchWithTimeout(url, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ text, metadata }),
-        // node-fetch doesn't support timeout param here for older versions; assume env controls upstream
-      });
+      }, RASA_TIMEOUT_MS);
       if (r.ok) {
         const json = await r.json();
         return { ok: true, raw: json, source: "conversation_parse" };
@@ -199,11 +241,11 @@ async function callRasaApi({ text, conversation_id = null, metadata = {}, sender
   try {
     const url = `${RASA_URL.replace(/\/$/, "")}/model/parse`;
     safeLog("Rasa API (model/parse)", { url, text: truncateText(text, 500) });
-    const r = await fetch(url, {
+    const r = await fetchWithTimeout(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ text }),
-    });
+    }, RASA_TIMEOUT_MS);
     if (r.ok) {
       const json = await r.json();
       return { ok: true, raw: json, source: "model_parse" };
@@ -218,11 +260,11 @@ async function callRasaApi({ text, conversation_id = null, metadata = {}, sender
   try {
     const url = `${RASA_URL.replace(/\/$/, "")}/webhooks/rest/webhook`;
     safeLog("Rasa API (rest webhook)", { url, text: truncateText(text, 500), sender });
-    const r = await fetch(url, {
+    const r = await fetchWithTimeout(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ sender, message: text }),
-    });
+    }, RASA_TIMEOUT_MS);
     if (r.ok) {
       const json = await r.json();
       return { ok: true, raw: json, source: "rest_webhook" };
@@ -251,6 +293,7 @@ async function normalizeResponse(raw, opts = {}) {
     }
   } catch (err) {
     safeLog("adapter normalization error", err && err.message ? err.message : err);
+    // continue to fallback normalization
   }
 
   // Fallback generic normalization
@@ -266,23 +309,25 @@ async function normalizeResponse(raw, opts = {}) {
         if (typeof m === "string") return m;
         if (m.text) return m.text;
         if (m.message) return m.message;
+        // try nested custom payloads
+        if (m.custom && (m.custom.text || m.custom.message)) return m.custom.text || m.custom.message;
         return JSON.stringify(m);
       })
       .filter(Boolean);
     return { reasoning: "", response: texts.join("\n\n"), stop: false };
   }
 
-  // If raw is object from model/parse
+  // If raw is object from model/parse or local LLM
   if (typeof raw === "object") {
-    // common fields on model/parse: intent, entities, text
-    const text = raw.text || raw.response || raw.output || "";
+    // local LLM shapes: { text } { response } { generated_text }
+    const text = raw.text || raw.response || raw.generated_text || raw.output || raw.message || "";
     const intent = raw.intent || raw.intent_ranking || null;
     const entities = raw.entities || null;
-    const reasoning = intent ? `Intent: ${JSON.stringify(intent)}` : "";
+    const reasoning = intent ? `Intent: ${JSON.stringify(intent)}` : (raw.reasoning || "");
     return {
       reasoning,
       response: (text || "").toString(),
-      stop: false,
+      stop: !!raw.stop,
       intents: intent,
       entities,
       raw,
@@ -296,7 +341,22 @@ async function normalizeResponse(raw, opts = {}) {
 // Build OpenAI-compatible (Chat Completion) response for Captain
 function buildOpenAIResponseObject(contentObj = {}, model = DEFAULT_MODEL) {
   // contentObj must be serializable to JSON; Captain expects choices[0].message.content to be a JSON string
-  const safeContent = typeof contentObj === "string" ? contentObj : safeJSON(contentObj);
+  let safeContent;
+  try {
+    if (contentObj === null || contentObj === undefined) {
+      safeContent = "";
+    } else if (typeof contentObj === "string") {
+      safeContent = contentObj;
+    } else if (typeof contentObj === "object") {
+      safeContent = safeJSON(contentObj);
+    } else {
+      // number, boolean, etc.
+      safeContent = String(contentObj);
+    }
+  } catch (err) {
+    safeContent = safeJSON({ error: "failed_to_serialize_content", detail: String(err && err.message ? err.message : err) });
+  }
+
   return {
     id: `chatcmpl-${Date.now()}`,
     object: "chat.completion",
@@ -327,7 +387,7 @@ function normalizeCopilotResponseFields(normalized) {
     reply_suggestions: Array.isArray(normalized.reply_suggestions)
       ? normalized.reply_suggestions
       : normalized.reply_suggestions
-      ? [normalized.reply_suggestions]
+      ? [normalized.reply_suggestion || normalized.reply_suggestions]
       : [],
   };
   return out;
@@ -346,12 +406,13 @@ app.post("/v1/chat/completions", async (req, res) => {
     safeLog("incoming", maskSensitive(payload));
 
     const messages = Array.isArray(payload.messages) ? payload.messages : [];
-    const systemMsg = messages.find((m) => m.role === "system")?.content || "";
+    const rawSystemContent = messages.find((m) => m.role === "system")?.content;
+    const systemMsg = extractSystem(rawSystemContent);
     const model = payload.model || DEFAULT_MODEL;
 
     // Detect copilot header or query
     const copilotHeader = req.headers["x-copilot-threads"] || req.query.copilot || "";
-    const copilot = copilotHeader === "1" || copilotHeader === "true" || copilot === true;
+    const copilot = copilotHeader === "1" || copilotHeader === "true";
 
     // Captain assistants detection
     const captainMode = isCaptainMode(messages);
@@ -408,8 +469,8 @@ app.post("/v1/chat/completions", async (req, res) => {
         // try to extract plain text from raw
         if (Array.isArray(callResult.raw)) {
           copilotPayload.response = callResult.raw.map((m) => (m.text ? m.text : JSON.stringify(m))).join("\n\n");
-        } else if (callResult.raw && callResult.raw.text) {
-          copilotPayload.response = callResult.raw.text;
+        } else if (callResult.raw && (callResult.raw.text || callResult.raw.response || callResult.raw.generated_text)) {
+          copilotPayload.response = callResult.raw.text || callResult.raw.response || callResult.raw.generated_text;
         } else {
           copilotPayload.response = "Desculpe, não tenho uma resposta agora.";
         }
