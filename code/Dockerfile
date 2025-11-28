@@ -1,18 +1,19 @@
-FROM node:18
+FROM node:18-slim
 
 WORKDIR /app
 
-# Copia primeiro o package.json para cache de dependências
-COPY package*.json ./
+# Instalar dependências essenciais
+RUN apt-get update && apt-get install -y \
+    bash curl git && \
+    rm -rf /var/lib/apt/lists/*
 
-# Instala dependências
-RUN npm install
+# Copiar package.json e instalar dependências
+COPY package.json ./
+RUN npm install --production
 
-# Copia todo o código
+# Copiar código
 COPY . .
 
-# Porta interna — NÃO mexer
 EXPOSE 3000
 
-# Start
 CMD ["node", "index.js"]
