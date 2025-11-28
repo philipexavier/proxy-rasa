@@ -1,8 +1,8 @@
 /**
  * Adapter Rasa → Captain (ESM)
- * Versão FINAL — completa, resiliente e compatível com Captain Assistants + Copilot Threads.
- * Suporta: intents, entities, PT-BR fix, reply_suggestions, label, areas, tags,
- * actions custom, multi-mensagens, e fallback profundo.
+ * Versão FINAL — ultra estável, resiliente e compatível 100% com Captain Assistants e Copilot Threads.
+ * Suporta intents, entities, PT-BR fix, reply_suggestions, label, areas, tags,
+ * actions custom, rich content, multi-mensagens e fallback profundo.
  */
 
 function fixPortuguese(text) {
@@ -16,7 +16,7 @@ function fixPortuguese(text) {
     .trim();
 }
 
-// Extrai texto de QUALQUER mensagem Rasa
+// Extrai texto de QUALQUER formato enviado pelo Rasa
 function extractText(m) {
   if (!m) return null;
 
@@ -24,14 +24,14 @@ function extractText(m) {
   if (typeof m.text === "string") return m.text;
   if (typeof m.message === "string") return m.message;
 
-  // Custom Actions
+  // Custom Action
   if (m.custom) {
     if (typeof m.custom.text === "string") return m.custom.text;
     if (typeof m.custom.message === "string") return m.custom.message;
     return JSON.stringify(m.custom);
   }
 
-  // Rich content
+  // Rich content (botões, imagens, payloads etc.)
   if (m.buttons || m.image || m.attachment || m.payload) {
     return JSON.stringify({
       buttons: m.buttons,
@@ -45,7 +45,7 @@ function extractText(m) {
 }
 
 export function normalizeRasaResponse(rawResp = null) {
-  // Caso nulo
+  // Nada retornado → fallback
   if (!rawResp) {
     return {
       reasoning: "",
@@ -54,39 +54,54 @@ export function normalizeRasaResponse(rawResp = null) {
     };
   }
 
-  // ARRAY → rest webhook responses
+  // ---------------------
+  // 1) ARRAY (REST webhook)
+  // ---------------------
   if (Array.isArray(rawResp)) {
     const texts = rawResp.map(extractText).filter(Boolean).join("\n\n");
 
     const intent = rawResp[0]?.intent?.name || null;
     const entities = rawResp.flatMap((m) => m?.entities || []).filter(Boolean);
 
-    return {
+    const final = {
       reasoning: "",
-      response: fixPortuguese(texts),
+      response: fixPortuguese(texts || "Desculpe, não tenho uma resposta agora."),
       stop: false,
       metadata: {
         intent,
         entities
       }
     };
+
+    // Blindagem: nunca deixa response vazio
+    if (!final.response.trim()) {
+      final.response = "Desculpe, não tenho uma resposta agora.";
+    }
+
+    return final;
   }
 
-  // STRING → pode ser JSON
+  // ---------------------
+  // 2) STRING (pode ser JSON)
+  // ---------------------
   if (typeof rawResp === "string") {
     const trimmed = rawResp.trim();
+
+    // Se for JSON dentro de string
     try {
       return normalizeRasaResponse(JSON.parse(trimmed));
     } catch {
       return {
         reasoning: "",
-        response: fixPortuguese(trimmed),
+        response: fixPortuguese(trimmed || "Desculpe, não tenho uma resposta agora."),
         stop: false
       };
     }
   }
 
-  // OBJETO
+  // ---------------------
+  // 3) OBJETO
+  // ---------------------
   if (typeof rawResp === "object") {
     const base =
       rawResp.response ||
@@ -106,25 +121,25 @@ export function normalizeRasaResponse(rawResp = null) {
       rawResp.metadata?.intent ||
       null;
 
-    // reply_suggestions unificados
+    // Unificar reply_suggestions
     const replySuggestions = [];
 
     if (rawResp.reply_suggestions) replySuggestions.push(...rawResp.reply_suggestions);
     if (rawResp.replySuggestions) replySuggestions.push(...rawResp.replySuggestions);
     if (rawResp.reply_suggestion) replySuggestions.push(rawResp.reply_suggestion);
 
-    // limpa valores undefined
-    const finalReplies = replySuggestions.filter(Boolean);
+    const finalReplies = replySuggestions
+      .filter(Boolean) // remove undefined / null
+      .map((v) => (typeof v === "string" ? v : JSON.stringify(v))); // Captain exige string
 
     const final = {
       reasoning: rawResp.reasoning || rawResp.explanation || "",
       response: fixPortuguese(String(base || "")),
       stop: !!rawResp.stop,
 
-      // Captain fields
-      reply_suggestions: finalReplies.length ? finalReplies : [],
+      // CAMPOS DO CAPTAIN
+      reply_suggestions: finalReplies,
       label: rawResp.label_suggestion || rawResp.label || null,
-
       sources: rawResp.sources || rawResp.metadata?.sources || null,
 
       metadata: {
@@ -134,17 +149,33 @@ export function normalizeRasaResponse(rawResp = null) {
         areas: rawResp.areas || rawResp.metadata?.areas || null
       },
 
-      // raw para debug
       raw: rawResp
     };
+
+    // Blindagem 1 — evita crash por response vazio
+    if (!final.response || !final.response.trim()) {
+      final.response = "Desculpe, não tenho uma resposta agora.";
+    }
+
+    // Blindagem 2 — label sempre string ou null
+    if (final.label && typeof final.label !== "string") {
+      final.label = String(final.label);
+    }
+
+    // Blindagem 3 — reply suggestions sempre array de strings
+    if (!Array.isArray(final.reply_suggestions)) {
+      final.reply_suggestions = [];
+    }
 
     return final;
   }
 
-  // fallback final
+  // ---------------------
+  // 4) Fallback absoluto
+  // ---------------------
   return {
     reasoning: "",
-    response: fixPortuguese(String(rawResp)),
+    response: fixPortuguese(String(rawResp) || "Desculpe, não tenho uma resposta agora."),
     stop: false
   };
 }
