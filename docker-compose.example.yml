@@ -1,0 +1,22 @@
+version: "3.9"
+
+services:
+  openai-proxy:
+    build:
+      context: ./code
+    ports:
+      - "3000:3000"
+    environment:
+      PORT: 3000
+      LLM_URL: http://local-llm:8000/generate
+      LLM_MODEL: jurema-7b
+      API_KEY: "super-secret"
+      LLM_TIMEOUT_MS: 30000
+    depends_on:
+      - local-llm
+
+  local-llm:
+    image: your-local-llm-image
+    ports:
+      - "8000:8000"
+    command: ["/bin/sh", "-c", "echo 'Substitua pelo seu servidor LLM' && sleep infinity"]
